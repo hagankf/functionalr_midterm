@@ -1,0 +1,134 @@
+---
+title: "KHagan Midterm April 27 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+library(glue)
+library(tidyverse)
+library(rio)
+library(janitor)
+library(pracma)
+library(here)
+
+download_file <- function(year) {
+    link <- glue::glue("https://www.oregon.gov/ode/educator-resources/assessment/TestResults20{year}/pagr_schools_ela_raceethnicity_{year-1}{year}.xlsx")
+    rio::import(link, setclass = "tibble", na = c("-", "--", "*"))
+}
+```
+
+```{r Q1}
+#Downloading data from last four school years and binding into single data frame:
+edu_df <- map_df(seq(15, 18, 1), download_file)
+edu_df <- clean_names(edu_df)
+unique(edu_df$academic_year) #checks out!
+
+#Filtering to include only student groups coded as "Hispanic/Latino" or "White"
+filtered <- edu_df %>%
+  filter(student_group == "White" | student_group == "Hispanic/Latino")
+unique(filtered$student_group) #confirming that the data is correctly filtered
+
+#Now we want only number_level 1 through 4  without number_proficient or variables rendered in terms of percent. 
+
+tidy_d <- filtered %>%
+  select(-contains("id"), -contains("proficient"), -contains("percent"), -subject, -participation_rate, -number_of_participants) %>%
+  gather(level, n, 6:9) %>%
+  mutate(level = parse_number(level)) #%>%
+  #mutate(academic_year = as.factor(academic_year), district = as.factor(district), school = as.factor(school), grade_level = as.factor(grade_level), student_group = as.factor(student_group)) #126792 obs. of 7 variables
+
+tidy_d <- na.omit(tidy_d) #90576 obs. of 7 variables (Good, the number of observations I have matches yours)
+```
+
+```{r Q2}
+
+group_d <- tidy_d %>% 
+  arrange(academic_year, district, school, student_group, grade_level, level) %>%
+  group_by(academic_year, school, student_group, grade_level) %>%
+  mutate(cn = cumsum(n))
+
+```
+
+```{r Q3}
+#using spread() to get out of tidy format, by putting student_group factors in column names
+update_d <- group_d %>%
+  select(-n) %>%
+  spread(key = student_group, value = cn)
+
+#Removing rows that have missing data:
+update_d <- na.omit(update_d) #good, looks like yours and same # observations
+
+```
+
+```{r PartBQ1}
+
+gap <- function(data, ref, foc) {
+    x <- data[[ref]]
+    y <- data[[foc]]
+    auc <- pracma::trapz(y / y[length(x)],
+                         x / x[length(x)])
+    sqrt(2)*qnorm(auc)
+}
+
+#Student group coded as White is the reference group (second argument), with student group coded as Hispanic/Latino as the focal group (third argument). We'll use map to apply this function over academic_year-school-grade_level observations. Because we expect an effect size to have decimals, we'll specify map_dbl:
+
+nest_d <- update_d %>% 
+  group_by(academic_year, school, grade_level) %>% #each grade level and academic year per school 
+  nest() #looking at Adrian elementary as an example, values are as expected
+
+for_effect <- nest_d %>%
+  mutate(effectsize = map_dbl(data, gap, "White", "Hispanic/Latino"))
+
+```
+
+```{r PartBQ2}
+
+#District variable is buried in the data (sub)tibble in my nest_d tbl_df above, so re-grouping to include district this time:
+
+nest_d2 <- update_d %>% 
+  group_by(academic_year, school, district, grade_level) %>% #each grade level and academic year per school 
+  nest() 
+
+for_effect2 <- nest_d2 %>%
+  mutate(effectsize = map_dbl(data, gap, "White", "Hispanic/Latino"))
+
+#nest the effect size data from previous question (for_effect) :
+for_plot <- for_effect2 %>%
+  group_by(academic_year, district, school) %>% #school/year/district combinations
+  nest() %>%
+  slice(1:100)
+
+#now to map through each school/year/district combination to generate a plot
+plots <- for_plot %>%
+    mutate(p = pmap(list(data, academic_year, district, school), 
+                    ~ggplot(..1, aes(grade_level, effect)) + #tell ggplot to access first element
+        geom_col(aes(fill = effect)) +
+      coord_flip() +
+        labs(title = glue("Achievement Gap Estimates: {..4}"), #access fourth element
+             subtitle = "Students coded as White compared to students coded as Hispanic/Latino",
+             caption = glue("{..2} School year, {..3} School District, Oregon"))))
+
+#str(plots)
+#head(plots)
+
+```
+
+```{r PartBQ3}
+
+fs::dir_create(here::here("plots"))
+
+final_plots <- plots %>%
+mutate(filenames = glue("{district}_{school}_{academic_year}"))
+#head(final_plots)
+#final_plots$filenames
+
+paths <- here::here("plots", glue("{final_plots$filenames}.png"))
+
+walk2(paths, final_plots$plots, ggsave,
+      width = 9.5, 
+      height = 6.5,
+      dpi = 500)
+
+```
+
